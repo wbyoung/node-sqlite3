@@ -69,6 +69,20 @@ public:
             Baton(db_, cb_), filename(filename_) {}
     };
 
+    struct FunctionEnvironment {
+        Isolate *isolate;
+        std::string name;
+        Persistent<Function> callback;
+
+        FunctionEnvironment(Isolate* isolate_, const char* name_, Handle<Function> cb_) :
+                isolate(isolate_), name(name_) {
+            NanAssignPersistent(callback, cb_);
+        }
+        virtual ~FunctionEnvironment() {
+            NanDisposePersistent(callback);
+        }
+    };
+
     typedef void (*Work_Callback)(Baton* baton);
 
     struct Call {
@@ -151,6 +165,10 @@ protected:
     static NAN_METHOD(Parallelize);
 
     static NAN_METHOD(Configure);
+
+    static NAN_METHOD(RegisterFunction);
+    static void FunctionIsolate(sqlite3_context *context, int argc, sqlite3_value **argv);
+    static void FunctionExecute(FunctionEnvironment *baton, sqlite3_context *context, int argc, sqlite3_value **argv);
 
     static void SetBusyTimeout(Baton* baton);
 

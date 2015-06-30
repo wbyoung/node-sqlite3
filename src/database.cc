@@ -5,6 +5,10 @@
 #include "database.h"
 #include "statement.h"
 
+#ifndef SQLITE_DETERMINISTIC
+#define SQLITE_DETERMINISTIC 0x800
+#endif
+
 using namespace node_sqlite3;
 
 Persistent<FunctionTemplate> Database::constructor_template;
@@ -24,6 +28,7 @@ void Database::Init(Handle<Object> target) {
     NODE_SET_PROTOTYPE_METHOD(t, "serialize", Serialize);
     NODE_SET_PROTOTYPE_METHOD(t, "parallelize", Parallelize);
     NODE_SET_PROTOTYPE_METHOD(t, "configure", Configure);
+    NODE_SET_PROTOTYPE_METHOD(t, "registerFunction", RegisterFunction);
 
     NODE_SET_GETTER(t, "open", OpenGetter);
 
@@ -354,6 +359,144 @@ NAN_METHOD(Database::Configure) {
     db->Process();
 
     NanReturnValue(args.This());
+}
+
+NAN_METHOD(Database::RegisterFunction) {
+    NanScope();
+    Database* db = ObjectWrap::Unwrap<Database>(args.This());
+
+    REQUIRE_ARGUMENTS(2);
+    REQUIRE_ARGUMENT_STRING(0, functionName);
+    REQUIRE_ARGUMENT_FUNCTION(1, callback);
+
+    std::string str = "(" + std::string(*String::Utf8Value(callback->ToString())) + ")";
+
+    Isolate *isolate = v8::Isolate::New();
+    isolate->Enter();
+    {
+        Locker locker(isolate);
+        Isolate::Scope isolate_scope(isolate);
+        HandleScope handle_scope(isolate);
+        Local<Context> context = Context::New(isolate);
+        Context::Scope context_scope(context);
+
+        Local<Object> global = NanGetCurrentContext()->Global();
+        Local<Function> eval = Local<Function>::Cast(global->Get(NanNew<String>("eval")));
+
+        // Local<String> str = String::Concat(String::Concat(NanNew<String>("("), callback->ToString()), NanNew<String>(")"));
+        Local<Value> argv[] = { NanNew<String>(str.c_str(), str.length()) };
+        // Local<Function> function = Local<Function>::Cast(TRY_CATCH_CALL(global, eval, 1, argv));
+        Local<Function> function = Local<Function>::Cast(eval->Call(global, 1, argv));
+
+        FunctionEnvironment *fn = new FunctionEnvironment(isolate, *functionName, function);
+        sqlite3_create_function(
+            db->_handle,
+            *functionName,
+            -1, // arbitrary number of args
+            SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+            fn,
+            FunctionIsolate,
+            NULL,
+            NULL);
+    }
+    isolate->Exit();
+
+    NanReturnValue(args.This());
+}
+
+void Database::FunctionIsolate(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    FunctionEnvironment *fn = (FunctionEnvironment *)sqlite3_user_data(context);
+
+    Isolate *isolate = fn->isolate;
+    isolate->Enter();
+    {
+        Locker locker(isolate);
+        HandleScope handle_scope(isolate);
+        Local<Context> v8context = Context::New(isolate);
+        Context::Scope context_scope(v8context);
+
+        Database::FunctionExecute(fn, context, argc, argv);
+    }
+    isolate->Exit();
+}
+
+void Database::FunctionExecute(FunctionEnvironment *fn, sqlite3_context *context, int argc, sqlite3_value **argv) {
+    NanScope();
+
+    Local<Function> cb = NanNew(fn->callback);
+    sqlite3_value **values = argv;
+
+    if (!cb.IsEmpty() && cb->IsFunction()) {
+
+        // build the argument list for the function call
+        typedef Local<Value> LocalValue;
+        std::vector<LocalValue> argv;
+        for (int i = 0; i < argc; i++) {
+            sqlite3_value *value = values[i];
+            int type = sqlite3_value_type(value);
+            Local<Value> arg;
+            switch(type) {
+                case SQLITE_INTEGER: {
+                    arg = NanNew<Number>(sqlite3_value_int64(value));
+                } break;
+                case SQLITE_FLOAT: {
+                    arg = NanNew<Number>(sqlite3_value_double(value));
+                } break;
+                case SQLITE_TEXT: {
+                    const char* text = (const char*)sqlite3_value_text(value);
+                    int length = sqlite3_value_bytes(value);
+                    arg = NanNew<String>(text, length);
+                } break;
+                case SQLITE_BLOB: {
+                    const void *blob = sqlite3_value_blob(value);
+                    int length = sqlite3_value_bytes(value);
+                    arg = NanNew(NanNewBufferHandle((char *)blob, length));
+                } break;
+                case SQLITE_NULL: {
+                    arg = NanNew(NanNull());
+                } break;
+            }
+
+            argv.push_back(arg);
+        }
+
+        TryCatch trycatch;
+        Local<Value> result = cb->Call(NanGetCurrentContext()->Global(), argc, argv.data());
+
+        // process the result
+        if (trycatch.HasCaught()) {
+            String::Utf8Value message(trycatch.Message()->Get());
+            sqlite3_result_error(context, *message, message.length());
+        }
+        else if (result->IsString() || result->IsRegExp()) {
+            String::Utf8Value value(result->ToString());
+            sqlite3_result_text(context, *value, value.length(), SQLITE_TRANSIENT);
+        }
+        else if (result->IsInt32()) {
+            sqlite3_result_int(context, result->Int32Value());
+        }
+        else if (result->IsNumber() || result->IsDate()) {
+            sqlite3_result_double(context, result->NumberValue());
+        }
+        else if (result->IsBoolean()) {
+            sqlite3_result_int(context, result->BooleanValue());
+        }
+        else if (result->IsNull() || result->IsUndefined()) {
+            sqlite3_result_null(context);
+        }
+        else if (Buffer::HasInstance(result)) {
+            Local<Object> buffer = result->ToObject();
+            sqlite3_result_blob(context,
+                Buffer::Data(buffer),
+                Buffer::Length(buffer),
+                SQLITE_TRANSIENT);
+        }
+        else {
+            std::string message("invalid return type in user function");
+            message = message + " " + fn->name;
+            sqlite3_result_error(context, message.c_str(), message.length());
+        }
+    }
 }
 
 void Database::SetBusyTimeout(Baton* baton) {
