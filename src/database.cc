@@ -28,7 +28,7 @@ void Database::Init(Handle<Object> target) {
     NODE_SET_PROTOTYPE_METHOD(t, "serialize", Serialize);
     NODE_SET_PROTOTYPE_METHOD(t, "parallelize", Parallelize);
     NODE_SET_PROTOTYPE_METHOD(t, "configure", Configure);
-    NODE_SET_PROTOTYPE_METHOD(t, "registerFunction", RegisterFunction);
+    NODE_SET_PROTOTYPE_METHOD(t, "loadEnvironment", RegisterFunctions);
 
     NODE_SET_GETTER(t, "open", OpenGetter);
 
@@ -361,15 +361,12 @@ NAN_METHOD(Database::Configure) {
     NanReturnValue(args.This());
 }
 
-NAN_METHOD(Database::RegisterFunction) {
+NAN_METHOD(Database::RegisterFunctions) {
     NanScope();
     Database* db = ObjectWrap::Unwrap<Database>(args.This());
 
-    REQUIRE_ARGUMENTS(2);
-    REQUIRE_ARGUMENT_STRING(0, functionName);
-    REQUIRE_ARGUMENT_FUNCTION(1, callback);
-
-    std::string str = "(" + std::string(*String::Utf8Value(callback->ToString())) + ")";
+    REQUIRE_ARGUMENTS(1);
+    REQUIRE_ARGUMENT_STRING(0, module);
 
     Isolate *isolate = v8::Isolate::New();
     isolate->Enter();
@@ -379,25 +376,32 @@ NAN_METHOD(Database::RegisterFunction) {
         HandleScope handle_scope(isolate);
         Local<Context> context = Context::New(isolate);
         Context::Scope context_scope(context);
+        Environment *env = CreateEnvironment(isolate, uv_default_loop(), context,
+            2, (const char *[]){ "node", *module },
+            0, (const char *[]){});
+        LoadEnvironment(env);
 
         Local<Object> global = NanGetCurrentContext()->Global();
-        Local<Function> eval = Local<Function>::Cast(global->Get(NanNew<String>("eval")));
+        Local<Object> process = Local<Object>::Cast(global->Get(NanNew<String>("process")));
+        Local<Object> mainModule = Local<Object>::Cast(process->Get(NanNew<String>("mainModule")));
+        Local<Object> exports = Local<Object>::Cast(mainModule->Get(NanNew<String>("exports")));
+        Local<Array> keys = exports->GetOwnPropertyNames();
+        int length = keys->Length();
+        for (int i = 0; i < length; i++) {
+            Local<Function> function = Local<Function>::Cast(exports->Get(keys->Get(i)));
+            String::Utf8Value functionName(keys->Get(i)->ToString());
 
-        // Local<String> str = String::Concat(String::Concat(NanNew<String>("("), callback->ToString()), NanNew<String>(")"));
-        Local<Value> argv[] = { NanNew<String>(str.c_str(), str.length()) };
-        // Local<Function> function = Local<Function>::Cast(TRY_CATCH_CALL(global, eval, 1, argv));
-        Local<Function> function = Local<Function>::Cast(eval->Call(global, 1, argv));
-
-        FunctionEnvironment *fn = new FunctionEnvironment(isolate, *functionName, function);
-        sqlite3_create_function(
-            db->_handle,
-            *functionName,
-            -1, // arbitrary number of args
-            SQLITE_UTF8 | SQLITE_DETERMINISTIC,
-            fn,
-            FunctionIsolate,
-            NULL,
-            NULL);
+            FunctionEnvironment *fn = new FunctionEnvironment(isolate, *functionName, function);
+            sqlite3_create_function(
+                db->_handle,
+                *functionName,
+                -1, // arbitrary number of args
+                SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                fn,
+                FunctionIsolate,
+                NULL,
+                NULL);
+        }
     }
     isolate->Exit();
 
@@ -461,7 +465,7 @@ void Database::FunctionExecute(FunctionEnvironment *fn, sqlite3_context *context
         }
 
         TryCatch trycatch;
-        Local<Value> result = cb->Call(NanGetCurrentContext()->Global(), argc, argv.data());
+        Local<Value> result = cb->Call(NanNew(NanUndefined()), argc, argv.data());
 
         // process the result
         if (trycatch.HasCaught()) {

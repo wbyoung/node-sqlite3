@@ -1,35 +1,13 @@
 var sqlite3 = require('..');
 var assert = require('assert');
+var path = require('path');
 
 describe('user functions', function() {
     var db;
     before(function(done) { db = new sqlite3.Database(':memory:', done); });
 
     it('should allow registration of user functions', function() {
-        db.registerFunction('MY_UPPERCASE', function(value) {
-            return value.toUpperCase();
-        });
-        db.registerFunction('MY_STRING_JOIN', function(value1, value2) {
-            return [value1, value2].join(' ');
-        });
-        db.registerFunction('MY_Add', function(value1, value2) {
-            return value1 + value2;
-        });
-        db.registerFunction('MY_REGEX', function(regex, value) {
-            return !!value.match(new RegExp(regex));
-        });
-        db.registerFunction('MY_REGEX_VALUE', function(regex, value) {
-            return /match things/i;
-        });
-        db.registerFunction('MY_ERROR', function(value) {
-            throw new Error('This function always throws');
-        });
-        db.registerFunction('MY_UNHANDLED_TYPE', function(value) {
-            return {};
-        });
-        db.registerFunction('MY_NOTHING', function(value) {
-
-        });
+        db.loadEnvironment(path.join(__dirname, 'support/user_functions.js'));
     });
 
     it('should process user functions with one arg', function(done) {
@@ -96,6 +74,23 @@ describe('user functions', function() {
 
     it('allows no return value from functions', function(done) {
         db.all('SELECT MY_NOTHING() AS val', function(err, rows) {
+            if (err) throw err;
+            assert.equal(rows.length, 1);
+            assert.equal(rows[0].val, undefined);
+            done();
+        });
+    });
+
+    it('does not allow access to external scope', function(done) {
+        db.all('SELECT MY_INVALID_SCOPING() AS val', function(err, rows) {
+            assert.equal(err.message, 'SQLITE_ERROR: Uncaught ReferenceError: db is not defined');
+            assert.equal(rows, undefined);
+            done();
+        });
+    });
+
+    it('allows use of require', function(done) {
+        db.all('SELECT MY_REQUIRE() AS val', function(err, rows) {
             if (err) throw err;
             assert.equal(rows.length, 1);
             assert.equal(rows[0].val, undefined);

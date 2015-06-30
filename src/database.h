@@ -166,7 +166,7 @@ protected:
 
     static NAN_METHOD(Configure);
 
-    static NAN_METHOD(RegisterFunction);
+    static NAN_METHOD(RegisterFunctions);
     static void FunctionIsolate(sqlite3_context *context, int argc, sqlite3_value **argv);
     static void FunctionExecute(FunctionEnvironment *baton, sqlite3_context *context, int argc, sqlite3_value **argv);
 
